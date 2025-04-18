@@ -34,6 +34,8 @@ class Attention(nn.Module):
         dtype: torch.dtype = None,
         dense_bias: Optional[bool] = None,
         config: Optional[ModelConfig] = None,
+        qk_norm_type: QkNormType = QkNormType.none,
+        q_scaling: float = 1.0,
     ):
         super().__init__()
         self.layer_idx = layer_idx
@@ -46,6 +48,7 @@ class Attention(nn.Module):
         self.max_position_embeddings = max_position_embeddings
         self.pos_embd_params = pos_embd_params
         self.dense_bias = dense_bias
+        self.q_scaling = q_scaling
 
         if dense_bias is None:
             self.dense_bias = bias
@@ -99,6 +102,7 @@ class Attention(nn.Module):
             quant_config=config.get_quant_config(),
             skip_create_weights=config.skip_create_weights,
         )
+
         self.quant_config = config.get_quant_config()
         self.attn_backend = config.attn_backend
         self.pos_embd_params = pos_embd_params
@@ -116,12 +120,22 @@ class Attention(nn.Module):
         self.o_lora = LoraLayer([LoraModuleType.ATTENTION_DENSE],
                                 [self.hidden_size])
 
-        if not config.skip_create_weights:
-            self.create_weights()
-        else:
-            self.create_backend()
+        attn_cls = get_attention_backend(self.attn_backend)
+        self.enable_rope_fusion = attn_cls.support_fused_rope(
+        ) and qk_norm_type != QkNormType.post_rope
+        self.attn = create_attention(
+            self.attn_backend,
+            self.layer_idx,
+            self.num_heads,
+            self.head_dim,
+            self.num_key_value_heads,
+            pos_embd_params=self.pos_embd_params
+            if self.enable_rope_fusion else None,
+            quant_config=self.quant_config,
+            skip_create_weights_in_init=config.skip_create_weights_in_init,
+            q_scaling=self.q_scaling,
+        )
 
-        self.enable_rope_fusion = self.attn.support_fused_rope()
         self.support_fused_qkv = self.attn.support_fused_qkv()
 
         self.rotary_emb = None
@@ -167,6 +181,7 @@ class Attention(nn.Module):
         mrope_config: Optional[dict] = None,
         all_reduce_params: Optional[AllReduceParams] = None,
         lora_params: Optional[dict] = None,
+        attention_window_size: Optional[int] = None,
         **kwargs,
     ) -> torch.Tensor:
         qkv = self.qkv_proj(hidden_states)
@@ -194,13 +209,22 @@ class Attention(nn.Module):
             out_scale = self.o_proj.inv_input_scale
 
         q, k, v = self.convert_qkv(q, k, v)
-        attn_output = self.attn.forward(q,
-                                        k,
-                                        v,
-                                        attn_metadata,
-                                        out_scale=out_scale,
-                                        attention_mask=attention_mask,
-                                        mrope_config=mrope_config)
+
+        attn_output = self.attn.forward(
+            q,
+            k,
+            v,
+            attn_metadata,
+            out_scale=out_scale,
+            attention_mask=attention_mask,
+            mrope_config=mrope_config,
+            attention_window_size=attention_window_size)
+        hidden_states = attn_output
+        attn_output = self.o_proj(attn_output,
+                                  all_reduce_params=all_reduce_params,
+                                  lora_params=lora_params,
+                                  layer_idx=self.layer_idx)
+        return attn_output
 
         attn_output = self.o_proj(attn_output,
                                   all_reduce_params=all_reduce_params)
