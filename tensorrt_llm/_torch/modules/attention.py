@@ -125,7 +125,7 @@ class Attention(nn.Module):
             and (config.pretrained_config.model_type == 'qwen3'
                  or config.pretrained_config.model_type == 'qwen3_moe'))
         attn_cls = get_attention_backend(self.attn_backend)
-        self.enable_rope_fusion = self.attn.support_fused_rope(
+        self.enable_rope_fusion = attn_cls.support_fused_rope(
         ) and not self.use_qk_norm
 
         self.attn = create_attention(
