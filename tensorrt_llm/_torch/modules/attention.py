@@ -18,6 +18,10 @@ from .multi_stream_utils import maybe_execute_in_parallel
 from .rms_norm import RMSNorm
 from .rotary_embedding import RotaryEmbedding
 
+class QkNormType(IntEnum):
+    none = 0
+    pre_rope = 1
+    post_rope = 2
 
 class Attention(nn.Module):
 
@@ -42,11 +46,13 @@ class Attention(nn.Module):
 
         self.hidden_size = hidden_size
         self.num_heads = num_attention_heads
-        self.head_dim = self.hidden_size // self.num_heads
+        self.head_dim = getattr(config.pretrained_config, "head_dim",
+                                self.hidden_size // self.num_heads)
         self.num_key_value_heads = num_key_value_heads
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
         self.max_position_embeddings = max_position_embeddings
         self.pos_embd_params = pos_embd_params
+        self.use_qk_norm = use_qk_norm
         self.dense_bias = dense_bias
         self.q_scaling = q_scaling
 
@@ -119,11 +125,7 @@ class Attention(nn.Module):
 
         self.o_lora = LoraLayer([LoraModuleType.ATTENTION_DENSE],
                                 [self.hidden_size])
-
-        self.use_qk_norm = (
-            config.pretrained_config
-            and (config.pretrained_config.model_type == 'qwen3'
-                 or config.pretrained_config.model_type == 'qwen3_moe'))
+        
         attn_cls = get_attention_backend(self.attn_backend)
         self.enable_rope_fusion = attn_cls.support_fused_rope(
         ) and not self.use_qk_norm
@@ -224,15 +226,10 @@ class Attention(nn.Module):
                                   layer_idx=self.layer_idx)
         return attn_output
 
-        attn_output = self.o_proj(attn_output,
-                                  all_reduce_params=all_reduce_params)
-        if lora_params is not None:
-            attn_lora_output = self.o_lora(attn_output, lora_params,
-                                           self.layer_idx)
-            if attn_lora_output is not None:
-                attn_output = attn_output + attn_lora_output
-
-        return attn_output
+    def apply_qk_norm(self, q, k):
+        raise NotImplementedError(
+            f"QK norm is not implemented for {self.__class__.__name__}."
+            "Please override the `apply_qk_norm` method in the subclass.")
 
 
 class MLA(nn.Module):
