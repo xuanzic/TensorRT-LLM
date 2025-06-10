@@ -408,6 +408,14 @@ public:
         }
     }
 
+    void removeBlock(SizeType32 const blockIdx, SizeType32 windowSize)
+    {
+        for (auto& beamBlockIds : mCacheBlockIds.at(windowSize))
+        {
+            beamBlockIds.erase(beamBlockIds.begin() + blockIdx);
+        }
+    }
+
     void removeFirstBlock(SizeType32 windowSize)
     {
         for (auto& beamBlockIds : mCacheBlockIds.at(windowSize))
@@ -774,6 +782,9 @@ private:
     //! \brief For FP4 quantization. Creates pool objects for FP4 block scalars.
     void createBlockScalePools(SizeType32 blockSize);
 
+    //! \brief Handle out-of-window blocks with priority consideration
+    void handleOutOfWindowBlockWithPriority(BlockPtr const& blockToEvict);
+    
 private:
     nvinfer1::DataType mDataType;
     SizeType32 mWindowSize;

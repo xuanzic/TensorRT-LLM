@@ -3185,6 +3185,148 @@ TEST_F(KVCacheManagerTest, KVCacheManagerMaxAttentionWindowWithReuseTest)
     EXPECT_NO_THROW(kvCacheManager.removeSequence(requestId, llmRequest));
 }
 
+TEST_F(KVCacheManagerTest, KVCacheManagerMaxAttentionWindowWithPriorityReuseTest)
+{
+    auto constexpr numLayers = 2;
+    auto constexpr numHeads = 2;
+    auto constexpr sizePerHead = 64;
+    auto constexpr tokensPerBlock = 4;
+    auto constexpr maxNumSequences = 8;
+    auto constexpr maxBeamWidth = 1;
+    auto constexpr sinkTokenLength = 0;
+    auto const stream = std::make_shared<tr::CudaStream>();
+    auto constexpr maxSequenceLength = 128;
+
+    auto constexpr maxAttentionWindow = 16;
+    auto constexpr temporaryAttentionWindow = 0;
+    auto constexpr maxBlocksPerSeq = tc::ceilDiv(maxAttentionWindow, tokensPerBlock) + kExtraBlockBuffer;
+
+    auto constexpr blocksInPrimaryPool = 16;
+    auto constexpr blocksInSecondaryPool = 16;
+
+    auto constexpr enableBlockReuse = true;
+    auto constexpr onboardBlocks = true;
+
+    constexpr SizeType32 kPrimaryLevel = 0;
+    constexpr SizeType32 kSecondaryLevel = 1;
+
+    KVCacheManager kvCacheManager(numLayers, numHeads, sizePerHead, tokensPerBlock, blocksInPrimaryPool,
+        blocksInSecondaryPool, maxNumSequences, maxBeamWidth, std::vector<BlockManager::SizeType32>{maxAttentionWindow},
+        std::nullopt, nvinfer1::DataType::kHALF, sinkTokenLength, stream, maxSequenceLength, enableBlockReuse,
+        onboardBlocks);
+    kvCacheManager.allocatePools(false);
+
+    auto const& blockManager = kvCacheManager.getBlockManager();
+    auto const onlyWindowSize = theOnlyWindowSize(kvCacheManager);
+
+    SizeType32 constexpr maxNewTokens = 40;
+    TokenIdType constexpr firstToken = 1000;
+    auto constexpr beamWidth = maxBeamWidth;
+    tr::SamplingConfig const samplingConfig{beamWidth};
+    bool constexpr isStreaming{false};
+
+    ///////////////////////////////////////////////////////////////////////////
+    // Test 1: High priority request - blocks should stay in primary pool when out-of-window
+    SizeType32 requestId = 0;
+    int inputLength = 16;
+    auto inputTokens = std::make_shared<VecTokens>(inputLength);
+    std::iota(inputTokens->begin(), inputTokens->end(), firstToken);
+
+    auto llmRequest = std::make_shared<LlmRequest>(requestId, maxNewTokens, inputTokens, samplingConfig, isStreaming);
+    llmRequest->setKvCacheRetentionConfig(
+        KvCacheRetentionConfig({KvCacheRetentionConfig::TokenRangeRetentionConfig(0, 8, 80),  // High priority first two blocks
+                               KvCacheRetentionConfig::TokenRangeRetentionConfig(8, std::nullopt, 30)}, // Low priority
+            30)); // Default decode priority
+
+    auto constexpr beamIdx = 0;
+
+    kvCacheManager.addSequence(requestId, inputLength, beamWidth, llmRequest);
+    GenerationRequest const& seq0 = kvCacheManager.getSequence(requestId);
+    EXPECT_EQ(llmRequest->getContextCurrentPosition(), 0);
+    EXPECT_THAT(seq0.getCacheBlockIds(onlyWindowSize).at(beamIdx), ::testing::ElementsAreArray({0, 1, 2, 3}));
+
+    // add tokens, making the window slide
+    llmRequest->addNewToken(1016, beamIdx);
+    kvCacheManager.addToken(requestId);
+    llmRequest->addNewToken(1017, beamIdx);
+    kvCacheManager.addToken(requestId);
+    llmRequest->addNewToken(1018, beamIdx);
+    kvCacheManager.addToken(requestId);
+    llmRequest->addNewToken(1019, beamIdx);
+    kvCacheManager.addToken(requestId);
+    
+    auto numTokens = llmRequest->getNumTokens(beamIdx);
+    auto numValidBlocks = getNumValidBlocks(seq0.getCacheBlockIds(onlyWindowSize)[beamIdx]);
+    auto numAllocatedPrimaryBlocks = blockManager.getNumAllocatedBlocks() - blocksInSecondaryPool;
+    
+    // With priority eviction, high-priority block 0 should stay in primary pool
+    // even though it's out of window
+    EXPECT_EQ(numAllocatedPrimaryBlocks, numValidBlocks);
+    EXPECT_EQ(blockManager.getNumFreeBlocks(), blocksInPrimaryPool - numValidBlocks);
+    EXPECT_THAT(seq0.getCacheBlockIds(onlyWindowSize).at(beamIdx), ::testing::ElementsAreArray({0, 1, 3, 4}));
+
+    EXPECT_NO_THROW(kvCacheManager.removeSequence(requestId, llmRequest));
+
+    ///////////////////////////////////////////////////////////////////////////
+    // Test 2: Low priority request - blocks should be offloaded when out-of-window
+    requestId = 1;
+    inputLength = 16;
+    inputTokens = std::make_shared<VecTokens>(inputLength);
+    std::iota(inputTokens->begin(), inputTokens->end(), firstToken + 100); // different input tokens
+   
+    
+    llmRequest = std::make_shared<LlmRequest>(requestId, maxNewTokens, inputTokens, samplingConfig, isStreaming);
+    // Set low priority for all tokens
+    llmRequest->setKvCacheRetentionConfig(
+        KvCacheRetentionConfig({KvCacheRetentionConfig::TokenRangeRetentionConfig(0, std::nullopt, 20)}, 
+            20)); 
+
+    kvCacheManager.addSequence(requestId, inputLength, beamWidth, llmRequest);
+    GenerationRequest const& seq1 = kvCacheManager.getSequence(requestId);
+    
+    // add tokens, making the window slide
+    llmRequest->addNewToken(1116, beamIdx);
+    kvCacheManager.addToken(requestId);
+    llmRequest->addNewToken(1117, beamIdx);
+    kvCacheManager.addToken(requestId);
+    llmRequest->addNewToken(1118, beamIdx);
+    kvCacheManager.addToken(requestId);
+    llmRequest->addNewToken(1119, beamIdx);
+    kvCacheManager.addToken(requestId);
+
+    numTokens = llmRequest->getNumTokens(beamIdx);
+    numValidBlocks = getNumValidBlocks(seq1.getCacheBlockIds(onlyWindowSize)[beamIdx]);
+    numAllocatedPrimaryBlocks = blockManager.getNumAllocatedBlocks() - blocksInSecondaryPool;
+    
+    EXPECT_EQ(numAllocatedPrimaryBlocks, numValidBlocks);
+    EXPECT_EQ(blockManager.getNumFreeBlocks(), blocksInPrimaryPool - numValidBlocks);
+    EXPECT_THAT(seq1.getCacheBlockIds(onlyWindowSize).at(beamIdx), ::testing::ElementsAreArray({4, 5, 6, 7}));
+
+    // With priority-based eviction, low-priority blocks should be more readily offloaded
+    auto freePrimaryAfterLowPriority = blockManager.getNumFreeBlocks(kPrimaryLevel);
+    auto freeSecondaryAfterLowPriority = blockManager.getNumFreeBlocks(kSecondaryLevel);
+
+    EXPECT_NO_THROW(kvCacheManager.removeSequence(requestId, llmRequest));
+
+    ///////////////////////////////////////////////////////////////////////////
+    // Test 3: Reuse test - verify blocks are reused preferentially
+    // Add a short request that should reuse the blocks from Test 2
+    requestId = 2;
+    inputLength = 7; // Should reuse first 2 blocks from sequence 1
+    inputTokens->resize(inputLength);
+    llmRequest = std::make_shared<LlmRequest>(requestId, maxNewTokens, inputTokens, samplingConfig, isStreaming);
+    
+    kvCacheManager.addSequence(requestId, inputLength, beamWidth, llmRequest);
+    GenerationRequest const& seq2 = kvCacheManager.getSequence(requestId);
+    EXPECT_EQ(llmRequest->getContextCurrentPosition(), 6);
+    
+    auto const& reusedBlockIds = seq2.getCacheBlockIds(onlyWindowSize).at(beamIdx);
+    EXPECT_EQ(reusedBlockIds[0], 17); 
+    
+    EXPECT_NO_THROW(kvCacheManager.removeSequence(requestId, llmRequest));
+}
+
+
 TEST_F(KVCacheManagerTest, KVCacheManagerVariableWindowAttentionWithReuseTest)
 {
     auto constexpr numLayers = 2;
