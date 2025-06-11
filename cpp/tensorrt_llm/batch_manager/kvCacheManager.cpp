@@ -1807,86 +1807,63 @@ void WindowBlockManager::detachBlock(
 
                 // instead of immediately offload OOW block, use priority to decide whether to offload or not
                 // we mark the block as OOW but keep it in primary pool if high priority
-                // Check if this is a high-priority block that should stay connected
-                SizeType32 blockToEvictIdx = outOfWindowBlockIdx;  
-                BlockPtr blockToEvict = outOfWindowBlock;
+                // Check if this is a high-priority block that should stay connected       
+                TLLM_LOG_DEBUG("Priority-based eviction: Evicting block %d (priority=%d)", 
+                              outOfWindowBlock->getBlockId(), outOfWindowBlock->getPriority());
                 
-                // Handle the block based on priority
-                SizeType32 totalBlocks = allocatedBlocks.size() / beamWidth;
-                executor::RetentionPriority lowestPriority = outOfWindowBlock->getPriority();
-                
-                for (SizeType32 i = outOfWindowBlockIdx; i < totalBlocks; ++i)
-                {
-                    auto currentBlock = allocatedBlocks.at(i * beamWidth + beamIdx);
-                    auto currentPriority = currentBlock->getPriority();
-                    
-                    if (currentPriority < lowestPriority)
-                    {
-                        lowestPriority = currentPriority;
-                        blockToEvictIdx = i;
-                        blockToEvict = currentBlock;
-                    }
-                }
-        
-                std::cout << "Priority-based eviction: Evicting block " << blockToEvict->getBlockId() 
-                        << " at index " << blockToEvictIdx 
-                        << " (priority=" << blockToEvict->getPriority() << ")" << std::endl;
-                
-                // handle the selected block based on priority
-                handleOutOfWindowBlockWithPriority(blockToEvict);
-
-                // remove the evicted block from allocated blocks
-                allocatedBlocks.erase(allocatedBlocks.begin() + blockToEvictIdx * beamWidth,
-                    allocatedBlocks.begin() + (blockToEvictIdx + 1) * beamWidth);
-                sequence.removeBlock(blockToEvictIdx, mWindowSize);
+                // Handle the selected block based on priority
+                // instead of immediately offload OOW block, use priority to decide whether to offload or not
+                // we mark the block as OOW but keep it in primary pool if high priority
+                // check if this is a high-priority block that should stay connected
+                handleOutOfWindowBlockWithPriority(outOfWindowBlock);
                 
             }
             else
             {
                 mEvictionPolicy->releaseBlock(outOfWindowBlock);
                 removeBlockFromHashMap(outOfWindowBlock);
-
-                // Disconnect first block from sequence
-                // Remove block from allocated blocks
-                allocatedBlocks.erase(allocatedBlocks.begin() + outOfWindowBlockIdx * beamWidth,
-                    allocatedBlocks.begin() + (outOfWindowBlockIdx + 1) * beamWidth);
-                // Remove stored block ids in sequence
-                sequence.removeFirstBlock(mWindowSize);
             }
+
+            // Disconnect first block from sequence
+            // Remove block from allocated blocks
+            allocatedBlocks.erase(allocatedBlocks.begin() + outOfWindowBlockIdx * beamWidth,
+                allocatedBlocks.begin() + (outOfWindowBlockIdx + 1) * beamWidth);
+            // Remove stored block ids in sequence
+            sequence.removeBlock(outOfWindowBlockIdx, mWindowSize);
+            TLLM_LOG_DEBUG("Priority-based eviction: Disconnected block %d from sequence", 
+                          outOfWindowBlock->getBlockId());
         }
     }
-
 }
 
 
 void WindowBlockManager::handleOutOfWindowBlockWithPriority(BlockPtr const& blockToEvict)
 {
-    // TODO: remove hardcoded value
-    constexpr executor::RetentionPriority kHighPriorityThreshold = 50;
-    auto const mMinFreePrimaryBlocks = 2; 
-    
+    // Use default priority as the threshold, default priority is 35
+    auto const kDefaultPriority = executor::KvCacheRetentionConfig::kDefaultRetentionPriority;
     auto const blockPriority = blockToEvict->getPriority();
+
     auto const hasSecondarySpace = getNumFreeBlocks(kSecondaryLevel) > 0;
-    auto const hasPrimarySpace = getNumFreeBlocks(kPrimaryLevel) > mMinFreePrimaryBlocks;
+    auto const hasPrimarySpace = getNumFreeBlocks(kPrimaryLevel) > 0;
     
     
-    if (blockPriority >= kHighPriorityThreshold && hasPrimarySpace)
+    if (blockPriority > kDefaultPriority && hasPrimarySpace)
     {
         // High priority block with available primary space - keep in primary pool
         mEvictionPolicy->releaseBlock(blockToEvict);
-        TLLM_LOG_DEBUG("Keeping high-priority out-of-window block %d (priority=%d) in primary pool", 
-                          blockToEvict->getBlockId(), blockPriority);
+        TLLM_LOG_DEBUG("Keeping high-priority block %d (priority=%d>%d) in primary pool", 
+                      blockToEvict->getBlockId(), blockPriority, kDefaultPriority);
     }
     else if (hasSecondarySpace)
     {
         // Either low priority OR high priority but no primary space - offload to secondary
         offloadBlock(blockToEvict);
-        TLLM_LOG_DEBUG("Offloading high-priority out-of-window block %d (priority=%d) to secondary pool", 
-                          blockToEvict->getBlockId(), blockPriority);
+        TLLM_LOG_DEBUG("Offloading block %d (priority=%d≤%d) to secondary pool", 
+                      blockToEvict->getBlockId(), blockPriority, kDefaultPriority);
     }
     else
     {
-        // No secondary space: release and discard
+        // release and discard
         mEvictionPolicy->releaseBlock(blockToEvict);
         removeBlockFromHashMap(blockToEvict);
         TLLM_LOG_DEBUG("No space available - discarding block %d (priority=%d)", 

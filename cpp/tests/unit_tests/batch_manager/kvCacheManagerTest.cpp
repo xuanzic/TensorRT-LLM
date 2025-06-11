@@ -3207,9 +3207,6 @@ TEST_F(KVCacheManagerTest, KVCacheManagerMaxAttentionWindowWithPriorityReuseTest
     auto constexpr enableBlockReuse = true;
     auto constexpr onboardBlocks = true;
 
-    constexpr SizeType32 kPrimaryLevel = 0;
-    constexpr SizeType32 kSecondaryLevel = 1;
-
     KVCacheManager kvCacheManager(numLayers, numHeads, sizePerHead, tokensPerBlock, blocksInPrimaryPool,
         blocksInSecondaryPool, maxNumSequences, maxBeamWidth, std::vector<BlockManager::SizeType32>{maxAttentionWindow},
         std::nullopt, nvinfer1::DataType::kHALF, sinkTokenLength, stream, maxSequenceLength, enableBlockReuse,
@@ -3236,7 +3233,7 @@ TEST_F(KVCacheManagerTest, KVCacheManagerMaxAttentionWindowWithPriorityReuseTest
     llmRequest->setKvCacheRetentionConfig(
         KvCacheRetentionConfig({KvCacheRetentionConfig::TokenRangeRetentionConfig(0, 8, 80),  // High priority first two blocks
                                KvCacheRetentionConfig::TokenRangeRetentionConfig(8, std::nullopt, 30)}, // Low priority
-            30)); // Default decode priority
+            30)); 
 
     auto constexpr beamIdx = 0;
 
@@ -3263,7 +3260,7 @@ TEST_F(KVCacheManagerTest, KVCacheManagerMaxAttentionWindowWithPriorityReuseTest
     // even though it's out of window
     EXPECT_EQ(numAllocatedPrimaryBlocks, numValidBlocks);
     EXPECT_EQ(blockManager.getNumFreeBlocks(), blocksInPrimaryPool - numValidBlocks);
-    EXPECT_THAT(seq0.getCacheBlockIds(onlyWindowSize).at(beamIdx), ::testing::ElementsAreArray({0, 1, 3, 4}));
+    EXPECT_THAT(seq0.getCacheBlockIds(onlyWindowSize).at(beamIdx), ::testing::ElementsAreArray({1, 2, 3, 4}));
 
     EXPECT_NO_THROW(kvCacheManager.removeSequence(requestId, llmRequest));
 
@@ -3272,7 +3269,7 @@ TEST_F(KVCacheManagerTest, KVCacheManagerMaxAttentionWindowWithPriorityReuseTest
     requestId = 1;
     inputLength = 16;
     inputTokens = std::make_shared<VecTokens>(inputLength);
-    std::iota(inputTokens->begin(), inputTokens->end(), firstToken + 100); // different input tokens
+    std::iota(inputTokens->begin(), inputTokens->end(), firstToken + 100); 
    
     
     llmRequest = std::make_shared<LlmRequest>(requestId, maxNewTokens, inputTokens, samplingConfig, isStreaming);
@@ -3298,22 +3295,19 @@ TEST_F(KVCacheManagerTest, KVCacheManagerMaxAttentionWindowWithPriorityReuseTest
     numValidBlocks = getNumValidBlocks(seq1.getCacheBlockIds(onlyWindowSize)[beamIdx]);
     numAllocatedPrimaryBlocks = blockManager.getNumAllocatedBlocks() - blocksInSecondaryPool;
     
-    EXPECT_EQ(numAllocatedPrimaryBlocks, numValidBlocks);
-    EXPECT_EQ(blockManager.getNumFreeBlocks(), blocksInPrimaryPool - numValidBlocks);
-    EXPECT_THAT(seq1.getCacheBlockIds(onlyWindowSize).at(beamIdx), ::testing::ElementsAreArray({4, 5, 6, 7}));
-
-    // With priority-based eviction, low-priority blocks should be more readily offloaded
-    auto freePrimaryAfterLowPriority = blockManager.getNumFreeBlocks(kPrimaryLevel);
-    auto freeSecondaryAfterLowPriority = blockManager.getNumFreeBlocks(kSecondaryLevel);
+    EXPECT_EQ(numAllocatedPrimaryBlocks, 3); // due to block0 in primary pool
+    EXPECT_EQ(blockManager.getNumFreeBlocks(), blocksInPrimaryPool - 3);
+    EXPECT_THAT(seq1.getCacheBlockIds(onlyWindowSize).at(beamIdx), ::testing::ElementsAreArray({4, 3, 5, 6}));
 
     EXPECT_NO_THROW(kvCacheManager.removeSequence(requestId, llmRequest));
 
     ///////////////////////////////////////////////////////////////////////////
     // Test 3: Reuse test - verify blocks are reused preferentially
-    // Add a short request that should reuse the blocks from Test 2
+    // Add a short request that should reuse the blocks from Test 1
     requestId = 2;
-    inputLength = 7; // Should reuse first 2 blocks from sequence 1
+    inputLength = 7; 
     inputTokens->resize(inputLength);
+    std::iota(inputTokens->begin(), inputTokens->end(), firstToken);
     llmRequest = std::make_shared<LlmRequest>(requestId, maxNewTokens, inputTokens, samplingConfig, isStreaming);
     
     kvCacheManager.addSequence(requestId, inputLength, beamWidth, llmRequest);
@@ -3321,7 +3315,7 @@ TEST_F(KVCacheManagerTest, KVCacheManagerMaxAttentionWindowWithPriorityReuseTest
     EXPECT_EQ(llmRequest->getContextCurrentPosition(), 6);
     
     auto const& reusedBlockIds = seq2.getCacheBlockIds(onlyWindowSize).at(beamIdx);
-    EXPECT_EQ(reusedBlockIds[0], 17); 
+    EXPECT_EQ(reusedBlockIds[0], 0); 
     
     EXPECT_NO_THROW(kvCacheManager.removeSequence(requestId, llmRequest));
 }
