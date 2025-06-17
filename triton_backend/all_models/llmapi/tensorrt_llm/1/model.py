@@ -336,7 +336,9 @@ class TritonPythonModel:
                 if streaming:
                     response = self._create_response(
                         request_output=request_output,
-                        output_config=output_config)
+                        output_config=output_config,
+                        final_kv_stats=final_kv_stats, 
+                        final_request_stats=final_request_stats)
                     flags = 0
                     if request_output.finished:
                         response_state["last_response_generated"] = True
@@ -350,7 +352,9 @@ class TritonPythonModel:
             if not streaming:
                 response_sender.send(
                     self._create_response(request_output=request_output,
-                                          output_config=output_config),
+                                          output_config=output_config,
+                                          final_kv_stats=final_kv_stats, 
+                                          final_request_stats=final_request_stats),
                     flags=pb_utils.TRITONSERVER_RESPONSE_COMPLETE_FINAL,
                 )
 
