@@ -10,6 +10,12 @@ pipeline_parallel_size: 1
 
 use_cuda_graph: False
 
+enable_iter_perf_stats: True
+# If true, enables per request stats per iteration
+# Must also set enable_iter_perf_stats to true to get request stats
+enable_iter_req_stats: True
+print_iter_log: False
+
 # ======= Triton Server Configurations =======
 # Triton Configurations to override the default values in config.pbtxt
 # If initialized in config.pbtxt, the values cannot be overwritten in model.py

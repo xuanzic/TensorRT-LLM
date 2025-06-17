@@ -314,6 +314,21 @@ class TritonPythonModel:
             # Generate the response.
             response_iterator = self._llm_engine.generate_async(
                 prompt, SamplingParams(**sampling_params), streaming)
+            
+            # get kv stats and per request stats
+            iteration_result = self._llm_engine.get_stats_async(2)
+            final_kv_stats = None
+            final_request_stats = None
+            async for stats in iteration_result:
+                print("DEBUG: Iteration Stats:", stats)
+                if "requestStats" in stats and stats["requestStats"]:
+                    req_stats = stats["requestStats"][0]
+                    if req_stats.get("stage") == "GENERATION_COMPLETE":
+                        final_kv_stats = stats.get("kvCacheStats")
+                        final_request_stats = req_stats
+                        print("DEBUG: final kv stats:", final_kv_stats)
+                        print("DEBUG: final_request_stats kv stats:", final_request_stats)
+                        break
 
             async for request_output in response_iterator:
                 # TODO: [JIRA-4040] Add request cancellation check here
@@ -385,7 +400,7 @@ class TritonPythonModel:
         streaming = get_streaming_from_request(request)
         return prompt, sampling_params, streaming, output_config
 
-    def _create_response(self, request_output, output_config):
+    def _create_response(self, request_output, output_config, final_kv_stats, final_request_stats):
         """Process the generated request_output and create the client response.
 
         Args:
@@ -422,6 +437,24 @@ class TritonPythonModel:
         response.append(
             pb_utils.Tensor("text_output",
                             np.asarray(text_output, dtype=self.output_dtype)))
+
+        if final_kv_stats:
+            print("has kv stats")
+            response.append(
+                pb_utils.Tensor("kv_reused_block",
+                            np.asarray(final_kv_stats['reusedBlocks'], dtype=self.output_dtype))
+            )
+            response.append(
+                pb_utils.Tensor("kv_cache_hit_rate",
+                            np.asarray(final_kv_stats['cacheHitRate'], dtype=self.output_dtype))
+            )
+        
+        if final_request_stats:
+            print("has req stats")
+            response.append(
+                pb_utils.Tensor("per_request_kv_hit_rate",
+                            np.asarray(final_request_stats['kvCacheHitRatePerRequest'], dtype=self.output_dtype))
+            )
 
         # Extract and add configurable output fields
         # The output_config loads related input from request
