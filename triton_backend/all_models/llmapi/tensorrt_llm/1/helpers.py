@@ -49,7 +49,7 @@ def get_output_config_from_request(request, batch_size=1, batch_index=0):
     """
     output_config_args = [
         'return_finish_reason', 'return_stop_reason',
-        'return_cumulative_logprob'
+        'return_cumulative_logprob', 'return_kv_cache_stats'
     ]
     param_mappings = {}
     for arg in output_config_args:
@@ -58,7 +58,8 @@ def get_output_config_from_request(request, batch_size=1, batch_index=0):
     default_values = {
         'return_finish_reason': False,
         'return_stop_reason': False,
-        'return_cumulative_logprob': False
+        'return_cumulative_logprob': False,
+        'return_kv_cache_stats': False
     }
     kwargs = convert_request_input_to_dict(request, param_mappings,
                                            default_values, batch_size,

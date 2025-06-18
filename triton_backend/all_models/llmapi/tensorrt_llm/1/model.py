@@ -304,6 +304,10 @@ class TritonPythonModel:
         }
         self._ongoing_request_count += 1
         decrement_ongoing_request_count = True
+
+        final_kv_stats = None
+        final_request_stats = None
+
         try:
             # TODO: [JIRA-4496] Implement when request contains batched prompts
             (prompt, sampling_params, streaming,
@@ -315,25 +319,18 @@ class TritonPythonModel:
             response_iterator = self._llm_engine.generate_async(
                 prompt, SamplingParams(**sampling_params), streaming)
             
-            # get kv stats and per request stats
-            iteration_result = self._llm_engine.get_stats_async(2)
-            final_kv_stats = None
-            final_request_stats = None
-            async for stats in iteration_result:
-                print("DEBUG: Iteration Stats:", stats)
-                if "requestStats" in stats and stats["requestStats"]:
-                    req_stats = stats["requestStats"][0]
-                    if req_stats.get("stage") == "GENERATION_COMPLETE":
-                        final_kv_stats = stats.get("kvCacheStats")
-                        final_request_stats = req_stats
-                        print("DEBUG: final kv stats:", final_kv_stats)
-                        print("DEBUG: final_request_stats kv stats:", final_request_stats)
-                        break
+            # to get the kv per request stats, need to have both
+            # return_kv_cache_stats and enable_iter_req_stats to true in config.pbtxt 
+            # and model.yaml accordingly
+            collect_stats = output_config.get('return_kv_cache_stats', False)
+            print("collecting stats", collect_stats)
 
+            request_output = None
             async for request_output in response_iterator:
                 # TODO: [JIRA-4040] Add request cancellation check here
                 # Send each response if streaming.
                 if streaming:
+                    # TODO: need to verify the kv cache metrics with streaming mode
                     response = self._create_response(
                         request_output=request_output,
                         output_config=output_config,
@@ -347,9 +344,23 @@ class TritonPythonModel:
                         decrement_ongoing_request_count = False
                     self._response_queue.put_nowait(
                         (response_state, response, flags))
+            
+            # get kv per request stats
+            if collect_stats and request_output and request_output.finished:
+                iteration_result = self._llm_engine.get_stats_async()
+                async for stats in iteration_result:
+                    if "requestStats" in stats and stats["requestStats"]:
+                        req_stats = stats["requestStats"][0]
+                        if req_stats.get("stage") == "GENERATION_COMPLETE":
+                            final_kv_stats = stats.get("kvCacheStats")
+                            final_request_stats = req_stats
+                            print("DEBUG: final kv stats:", final_kv_stats)
+                            print("DEBUG: final request stats:", final_request_stats)
+                            break
 
             # Send the last response which contains all the outputs if not streaming.
             if not streaming:
+                print("not streaming")
                 response_sender.send(
                     self._create_response(request_output=request_output,
                                           output_config=output_config,
@@ -442,24 +453,6 @@ class TritonPythonModel:
             pb_utils.Tensor("text_output",
                             np.asarray(text_output, dtype=self.output_dtype)))
 
-        if final_kv_stats:
-            print("has kv stats")
-            response.append(
-                pb_utils.Tensor("kv_reused_block",
-                            np.asarray(final_kv_stats['reusedBlocks'], dtype=self.output_dtype))
-            )
-            response.append(
-                pb_utils.Tensor("kv_cache_hit_rate",
-                            np.asarray(final_kv_stats['cacheHitRate'], dtype=self.output_dtype))
-            )
-        
-        if final_request_stats:
-            print("has req stats")
-            response.append(
-                pb_utils.Tensor("per_request_kv_hit_rate",
-                            np.asarray(final_request_stats['kvCacheHitRatePerRequest'], dtype=self.output_dtype))
-            )
-
         # Extract and add configurable output fields
         # The output_config loads related input from request
         output_fields = {
@@ -479,6 +472,27 @@ class TritonPythonModel:
                 response.append(
                     pb_utils.Tensor(output_name,
                                     np.asarray(tensor_data, dtype=np.object_)))
+        
+        if output_config.get('return_kv_cache_stats', False) and final_kv_stats:
+            response.append(
+                pb_utils.Tensor("kv_reused_block",
+                            np.asarray(final_kv_stats['reusedBlocks'], dtype=self.output_dtype))
+            )
+        
+        if output_config.get('return_kv_cache_stats', False) and final_request_stats:
+            response.append(
+                pb_utils.Tensor("per_request_kv_hit_rate",
+                            np.asarray(final_request_stats['kvCacheHitRatePerRequest'], dtype=self.output_dtype))
+            )
+            response.append(
+                pb_utils.Tensor("alloc_new_blocks_per_request",
+                            np.asarray(final_request_stats['allocNewBlocksPerRequest'], dtype=self.output_dtype))
+            )
+            response.append(
+                pb_utils.Tensor("alloc_total_blocks_per_request",
+                            np.asarray(final_request_stats['allocTotalBlocksPerRequest'], dtype=self.output_dtype))
+            )
+
 
         return pb_utils.InferenceResponse(output_tensors=response)
 
