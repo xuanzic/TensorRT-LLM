@@ -1793,12 +1793,14 @@ class PyExecutor:
                     request.get_tokens()[beam_idx])
 
                 def create_new_request(input_tokens):
-                    return LlmRequest(request_id=request.py_request_id,
-                                      max_new_tokens=request.py_max_new_tokens,
-                                      input_tokens=input_tokens,
-                                      sampling_config=request.sampling_config,
-                                      is_streaming=False,
-                                      is_draft=True)
+                    return LlmRequest(
+                        request_id=request.py_request_id,
+                        max_new_tokens=request.py_max_new_tokens,
+                        input_tokens=input_tokens,
+                        sampling_config=request.sampling_config,
+                        return_perf_metrics=request.return_perf_metrics,
+                        is_streaming=False,
+                        is_draft=True)
 
                 if request.max_beam_num_tokens - 1 == request.py_prompt_len:
                     # This is the first time the draft model is seeing this request.
