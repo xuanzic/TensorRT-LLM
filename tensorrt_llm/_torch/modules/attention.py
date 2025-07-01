@@ -24,12 +24,6 @@ class QkNormType(IntEnum):
     pre_rope = 1
     post_rope = 2
 
-class QkNormType(IntEnum):
-    none = 0
-    pre_rope = 1
-    post_rope = 2
-
-
 class Attention(nn.Module):
 
     def __init__(
@@ -66,10 +60,6 @@ class Attention(nn.Module):
         if dense_bias is None:
             self.dense_bias = bias
 
-        if (self.head_dim * self.num_heads) != self.hidden_size:
-            raise ValueError(
-                f"hidden_size must be divisible by num_heads (got `hidden_size`: {self.hidden_size}"
-                f" and `num_heads`: {self.num_heads}).")
 
         # tensor parallel
         config = config or ModelConfig()
@@ -106,7 +96,7 @@ class Attention(nn.Module):
             skip_create_weights_in_init=config.skip_create_weights_in_init,
         )
         self.o_proj = Linear(
-            self.hidden_size,
+            tp_size * self.q_size,
             self.hidden_size,
             bias=self.dense_bias,
             dtype=dtype,
@@ -192,22 +182,22 @@ class Attention(nn.Module):
         CAUSAL,
         mrope_config: Optional[dict] = None,
         all_reduce_params: Optional[AllReduceParams] = None,
-        lora_params: Optional[dict] = None,
+        #lora_params: Optional[dict] = None,
         attention_window_size: Optional[int] = None,
         **kwargs,
     ) -> torch.Tensor:
         qkv = self.qkv_proj(hidden_states)
 
-        if lora_params is not None:
-            qkv_lora = self.splitted_qkv_lora(hidden_states, lora_params,
-                                              self.layer_idx)
-            if qkv_lora is not None:
-                qkv = qkv + qkv_lora
+        # if lora_params is not None:
+        #     qkv_lora = self.splitted_qkv_lora(hidden_states, lora_params,
+        #                                       self.layer_idx)
+        #     if qkv_lora is not None:
+        #         qkv = qkv + qkv_lora
 
-            qkv_lora = self.fused_qkv_lora(hidden_states, lora_params,
-                                           self.layer_idx)
-            if qkv_lora is not None:
-                qkv = qkv + qkv_lora
+        #     qkv_lora = self.fused_qkv_lora(hidden_states, lora_params,
+        #                                    self.layer_idx)
+        #     if qkv_lora is not None:
+        #         qkv = qkv + qkv_lora
 
         q, k, v = qkv, None, None
 
@@ -220,7 +210,7 @@ class Attention(nn.Module):
             if self.qk_norm_type == QkNormType.post_rope:
                 q, k = self.apply_qk_norm(q, k)
         out_scale = None
-        
+
         if self.o_proj.has_fp8_qdq or self.o_proj.has_nvfp4 or self.o_proj.has_fp8_block_scales:
             out_scale = self.o_proj.inv_input_scale
 
@@ -238,8 +228,9 @@ class Attention(nn.Module):
         hidden_states = attn_output
         attn_output = self.o_proj(attn_output,
                                   all_reduce_params=all_reduce_params,
-                                  lora_params=lora_params,
-                                  layer_idx=self.layer_idx)
+                                  #lora_params=lora_params,
+                                  layer_idx=self.layer_idx
+                                  )
         return attn_output
 
     def apply_qk_norm(self, q, k):

@@ -164,7 +164,7 @@ def main():
     prompts = args.prompt if args.prompt else example_prompts
 
     if True:
-        with open("/workspace/data/prompt_96k_success_0.txt", "r") as f:
+        with open("chunks/chunk_1.txt", "r") as f:
             # with open("/workspace/data/prompt_96k_2k.txt", "r") as f:
             prompts = [f.read()]
 

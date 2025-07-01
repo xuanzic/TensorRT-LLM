@@ -310,7 +310,7 @@ class Linear(nn.Module):
             self.register_parameter("bias", None)
         self._weights_created = True
 
-    def apply_linear(self, input, weight, bias):
+    def apply_linear(self, input, weight, bias, layer_idx: Optional[int] | None = None):
         if self.has_any_quant:
             qc = self.quant_config
             if self.has_fp8_qdq:
@@ -392,6 +392,7 @@ class Linear(nn.Module):
         input: Union[torch.Tensor, Fp4QuantizedTensor],
         *,
         all_reduce_params: Optional[AllReduceParams] = None,
+        layer_idx: Optional[int] = None
     ) -> torch.Tensor:
         from ..distributed import allgather
 
@@ -401,19 +402,19 @@ class Linear(nn.Module):
                 fuse_bias = self._maybe_fuse_bias_into_allreduce(
                     bias, all_reduce_params)
                 bias = None if fuse_bias else bias
-                output = self.apply_linear(input, self.weight, bias)
+                output = self.apply_linear(input, self.weight, bias, layer_idx)
                 output = self.all_reduce(
                     output,
                     all_reduce_params=all_reduce_params,
                 )
             else:
-                output = self.apply_linear(input, self.weight, bias)
+                output = self.apply_linear(input, self.weight, bias, layer_idx)
         elif self.tp_mode == TensorParallelMode.COLUMN:
-            output = self.apply_linear(input, self.weight, self.bias)
+            output = self.apply_linear(input, self.weight, self.bias, layer_idx)
             if self.gather_output:
                 output = allgather(output, self.mapping)
         else:
-            output = self.apply_linear(input, self.weight, self.bias)
+            output = self.apply_linear(input, self.weight, self.bias, layer_idx)
 
         return output
 
@@ -421,6 +422,7 @@ class Linear(nn.Module):
         assert self._weights_created
 
         def _copy(dst: Parameter, src: torch.Tensor):
+            print(f"[DEBUG] Copying tensor: dst.shape={dst.shape}, src.shape={src.shape}")
             assert dst.dtype == src.dtype, f"Incompatible dtype. dst: {dst.dtype}, src: {src.dtype}"
             dst.data.copy_(src)
 

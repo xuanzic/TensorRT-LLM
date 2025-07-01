@@ -19,7 +19,8 @@ class MLP(nn.Module):
                  activation: Callable[[torch.Tensor], torch.Tensor] = None,
                  dtype: Optional[torch.dtype] = None,
                  config: Optional[ModelConfig] = None,
-                 layer_idx: Optional[int] = None):
+                 layer_idx: Optional[int] = None
+                 ):
 
         super().__init__()
         self.layer_idx = layer_idx
@@ -58,10 +59,10 @@ class MLP(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        lora_params: Optional[dict] = None,
+        #lora_params: Optional[dict] = None,
     ) -> torch.Tensor:
-        if lora_params is not None:
-            return self.forward_lora(x, lora_params=lora_params)
+        # if lora_params is not None:
+        #     return self.forward_lora(x, lora_params=lora_params)
 
         x_up = self.up_proj(x)
         x_act = self.activation(x_up)
