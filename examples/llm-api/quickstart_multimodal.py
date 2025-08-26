@@ -21,6 +21,27 @@ example_medias_and_prompts = {
             "Describe the traffic condition on the road in the image.",
         ]
     },
+    "multi_turn_image": {
+        "system_prompt": "You are a helpful AI assistant that can analyze images and answer questions about them.",
+        "conversations": [
+            {
+                "media": "https://huggingface.co/datasets/YiYiXu/testing-images/resolve/main/seashore.png",
+                "user_questions": [
+                    "What do you see in this image?",
+                    "What colors are prominent in this scene?",
+                    "How would you describe the mood of this image?"
+                ]
+            },
+            {
+                "media": "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/diffusers/inpaint.png",
+                "user_questions": [
+                    "What is the main object in this image?",
+                    "What is the weather condition shown?",
+                    "How does the lighting affect the scene?"
+                ]
+            }
+        ]
+    },
     "video": {
         "media": [
             "https://huggingface.co/datasets/Efficient-Large-Model/VILA-inference-demos/resolve/main/OAI-sora-tokyo-walk.mp4",
@@ -122,6 +143,12 @@ def add_multimodal_args(parser):
          " ├── __init__.py"
          " ├── <model_name>.py"
          " └── <sub_dirs>"))
+    parser.add_argument("--sequential_mode",
+                        action='store_true',
+                        help="Run requests one by one to observe KV cache reuse (only for image modality for now).")
+    parser.add_argument("--multi_turn_mode",
+                        action='store_true',
+                        help="Run multi-turn conversations where each request builds on previous ones (only for image modality).")
     return parser
 
 
@@ -145,7 +172,16 @@ def parse_arguments():
     parser = add_lora_args(parser)
     args = parser.parse_args()
 
-    args.disable_kv_cache_reuse = True  # kv cache reuse does not work for multimodal, force overwrite
+    # Enable KV cache reuse for sequential mode with image modality
+    if (args.sequential_mode or args.multi_turn_mode) and args.modality == "image":
+        args.disable_kv_cache_reuse = False
+        if args.sequential_mode:
+            print("Sequential mode enabled: KV cache reuse will be enabled for image modality")
+        if args.multi_turn_mode:
+            print("Multi-turn mode enabled: KV cache reuse will be enabled for image modality")
+    else:
+        args.disable_kv_cache_reuse = True  # kv cache reuse does not work for multimodal, force overwrite
+    
     if args.kv_cache_fraction is None:
         args.kv_cache_fraction = 0.6  # lower the default kv cache fraction for multimodal
 
@@ -188,36 +224,170 @@ def main():
         f"Unsupported model_type: {model_type} found!\n" \
         f"Supported types: {MULTIMODAL_PLACEHOLDER_REGISTRY.get_registered_model_types()}"
 
-    # set prompts and media to example prompts and images if they are not provided
-    if args.prompt is None:
-        args.prompt = example_medias_and_prompts[args.modality]["prompt"]
-    if args.media is None:
-        args.media = example_medias_and_prompts[args.modality]["media"]
-    inputs = default_multimodal_input_loader(tokenizer=llm.tokenizer,
-                                             model_dir=str(llm._hf_model_dir),
-                                             model_type=model_type,
-                                             modality=args.modality,
-                                             prompts=args.prompt,
-                                             media=args.media,
-                                             image_data_format=image_format,
-                                             num_frames=args.num_frames,
-                                             device=args.device)
+    if args.sequential_mode and args.modality == "image":
+        # For sequential mode, use only the first image and prompt, but run it multiple times
+        single_prompt = args.prompt[0] if isinstance(args.prompt, list) else args.prompt
+        single_media = args.media[0] if isinstance(args.media, list) else args.media
+        
+        num_repetitions = 5  # Run the same case 5 times to observe KV cache reuse
+        print(f"\n=== Sequential Mode: Processing same case {num_repetitions} times ===")
+        print(f"Image: {single_media}")
+        print(f"Prompt: {single_prompt}")
+        print("This mode allows observation of KV cache reuse when the same image/prompt is processed repeatedly.\n")
+        
+        outputs = []
+        for i in range(num_repetitions):
+            print(f"Processing request {i+1}/{num_repetitions}...")
+            
+            # Create input for single request (same image and prompt each time)
+            single_input = default_multimodal_input_loader(
+                tokenizer=llm.tokenizer,
+                model_dir=str(llm._hf_model_dir),
+                model_type=model_type,
+                modality=args.modality,
+                prompts=[single_prompt],
+                media=[single_media],
+                image_data_format=image_format,
+                num_frames=args.num_frames,
+                device=args.device
+            )
+            
+            lora_request = None
+            if args.load_lora:
+                lora_request = model_class.lora_request(1, args.modality, llm._hf_model_dir)
+            
+            # Generate for single request
+            single_output = llm.generate(
+                single_input,
+                sampling_params,
+                lora_request=lora_request,
+            )
+            
+            outputs.extend(single_output)
+            
+            # Print result immediately
+            generated_text = single_output[0].outputs[0].text
+            print(f"[{i}] Generated text: {generated_text!r}")
+            print("-" * 80)
+        
+        print(f"\nCompleted {len(outputs)} sequential requests with the same image/prompt.")
+    
+    elif args.multi_turn_mode and args.modality == "image":
+        print(f"\n=== Multi-Turn Mode: Processing conversation with KV cache reuse ===")
+        print("Each request builds on the previous conversation history for maximum KV cache reuse.\n")
+        
+        # Get multi-turn conversation data
+        if args.prompt is None and args.media is None:
+            # Use default multi-turn example above
+            multi_turn_data = example_medias_and_prompts["multi_turn_image"]
+            system_prompt = multi_turn_data["system_prompt"]
+            conversations = multi_turn_data["conversations"]
+        else:
+            # For custom multi-turn, we'll need to structure the data differently
+            # For now, use a simple approach with the first image and multiple questions
+            system_prompt = "You are a helpful AI assistant that can analyze images and answer questions about them."
+            single_media = args.media[0] if isinstance(args.media, list) else args.media
+            conversations = [{
+                "media": single_media,
+                "user_questions": args.prompt if isinstance(args.prompt, list) else [args.prompt]
+            }]
+        
+        outputs = []
+        
+        for conv_idx, conversation in enumerate(conversations):
+            print(f"\n--- Conversation {conv_idx + 1} ---")
+            print(f"Image: {conversation['media']}")
 
-    lora_request = None
-    if args.load_lora:
-        lora_request = model_class.lora_request(len(inputs), args.modality,
-                                                llm._hf_model_dir)
+            conversation_history = []
+            
+            for q_idx, user_question in enumerate(conversation['user_questions']):
+                print(f"\nProcessing turn {q_idx + 1}/{len(conversation['user_questions'])}...")
+                
+                # Build the full conversation context
+                if q_idx == 0:
+                    # First question in this conversation
+                    full_prompt = f"{system_prompt}\n\nUser: {user_question}\nAssistant:"
+                else:
+                    # Subsequent questions - include previous Q&A
+                    full_prompt = f"{system_prompt}\n\n"
+                    for hist_item in conversation_history:
+                        full_prompt += f"User: {hist_item['question']}\nAssistant: {hist_item['response']}\n\n"
+                    full_prompt += f"User: {user_question}\nAssistant:"
+                    print(f'full prompt in conversation, {full_prompt}')
+                
+                # Create input for this turn
+                turn_input = default_multimodal_input_loader(
+                    tokenizer=llm.tokenizer,
+                    model_dir=str(llm._hf_model_dir),
+                    model_type=model_type,
+                    modality=args.modality,
+                    prompts=[full_prompt],
+                    media=[conversation['media']],
+                    image_data_format=image_format,
+                    num_frames=args.num_frames,
+                    device=args.device
+                )
+                
+                lora_request = None
+                if args.load_lora:
+                    lora_request = model_class.lora_request(1, args.modality, llm._hf_model_dir)
+                
+                # Generate response for this turn
+                turn_output = llm.generate(
+                    turn_input,
+                    sampling_params,
+                    lora_request=lora_request,
+                )
+                
+                outputs.extend(turn_output)
+                
+                # Get the generated response
+                generated_text = turn_output[0].outputs[0].text
+                
+                # Store in conversation history
+                conversation_history.append({
+                    'question': user_question,
+                    'response': generated_text
+                })
+                
+                # Print result
+                print(f"User: {user_question}")
+                print(f"Assistant: {generated_text}")
+                print("-" * 80)
+        
+        print(f"\nCompleted multi-turn conversation with {len(outputs)} total turns.")
+           
+    else:
+        # set prompts and media to example prompts and images if they are not provided
+        if args.prompt is None:
+            args.prompt = example_medias_and_prompts[args.modality]["prompt"]
+        if args.media is None:
+            args.media = example_medias_and_prompts[args.modality]["media"]
+        inputs = default_multimodal_input_loader(tokenizer=llm.tokenizer,
+                                                model_dir=str(llm._hf_model_dir),
+                                                model_type=model_type,
+                                                modality=args.modality,
+                                                prompts=args.prompt,
+                                                media=args.media,
+                                                image_data_format=image_format,
+                                                num_frames=args.num_frames,
+                                                device=args.device)
 
-    outputs = llm.generate(
-        inputs,
-        sampling_params,
-        lora_request=lora_request,
-    )
+        lora_request = None
+        if args.load_lora:
+            lora_request = model_class.lora_request(len(inputs), args.modality,
+                                                    llm._hf_model_dir)
 
-    for i, output in enumerate(outputs):
-        prompt = args.prompt[i]
-        generated_text = output.outputs[0].text
-        print(f"[{i}] Prompt: {prompt!r}, Generated text: {generated_text!r}")
+        outputs = llm.generate(
+            inputs,
+            sampling_params,
+            lora_request=lora_request,
+        )
+
+        for i, output in enumerate(outputs):
+            prompt = args.prompt[i]
+            generated_text = output.outputs[0].text
+            print(f"[{i}] Prompt: {prompt!r}, Generated text: {generated_text!r}")
 
 
 if __name__ == "__main__":
